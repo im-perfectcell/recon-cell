@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 #
-# Enhanced Reconnaissance Automation Script v4.6
-# Features: Asynchronous scanning, rate limiting, dependency fallback, and improved vulnerability scanning
+# Enhanced Reconnaissance Automation Script v4.7
 #
 import subprocess
 import os
@@ -19,27 +18,22 @@ import shlex
 import xml.etree.ElementTree as ET
 import importlib.util
 import csv
-import math
 import tempfile
 import hashlib
 
 # --- Configuration ---
-__version__ = "4.6"
+__version__ = "4.7"
 DEFAULT_PORTS = "80,443,8080,8443,8000,8008,8088,8888,3000,5000,9000"
-MASSCAN_RATE = 1000
-DEFAULT_THREADS = 10
-DEFAULT_RATE_LIMIT = 10  # Requests per second
+GITHUB_RAW_URL = "https://raw.githubusercontent.com/yourusername/recon-suite/main/recon.py"
 OUTPUT_DIR = "recon_results"
 WEB_PORTS = {80, 443, 8080, 8443, 8000, 8008, 8088, 8888, 3000, 5000, 9000}
 TIMEOUT = 5
-SSL_VERIFY = False  # Disable SSL verification by default
-GITHUB_RAW_URL = "https://raw.githubusercontent.com/yourusername/yourrepo/main/deepseek_python_20250726_329d85.py"  # CHANGE THIS
+SSL_VERIFY = False
 
 # --- Helper Functions ---
-def print_banner(threads, ports):
+def print_banner():
     print("="*60)
-    print(f"  Enhanced Recon Automation Script v{__version__}")
-    print(f"  Threads: {threads} | Ports: {ports}")
+    print(f"  Recon Suite v{__version__} - Professional Security Scanner")
     print("="*60)
     print(f"[*] Start: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
