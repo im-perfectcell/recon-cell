@@ -1,6 +1,6 @@
 #!/bin/bash
-# Recon Suite Installer
-echo "[*] Setting up Recon Suite v4.7"
+# Recon-Cell Installer
+echo "[*] Setting up Recon-Cell v4.7"
 
 # Create installation directory
 INSTALL_DIR="$HOME/.recon-suite"
