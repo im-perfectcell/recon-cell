@@ -21,7 +21,7 @@ import csv
 # --- Configuration ---
 __version__ = "1.2"
 DEFAULT_PORTS = "80,443,8080,8443,8000,8008,8088,8888,3000,5000,9000"
-GITHUB_RAW_URL = "https://raw.githubusercontent.com/yourusername/recon-cell/main/recon-cell.py"
+GITHUB_RAW_URL = "https://github.com/im-perfectcell/recon-cell/main/recon-cell.py"
 OUTPUT_DIR = "recon_results"
 WEB_PORTS = {80, 443, 8080, 8443, 8000, 8008, 8088, 8888, 3000, 5000, 9000}
 TIMEOUT = 5
