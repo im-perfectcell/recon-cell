@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# Enhanced Reconnaissance Automation Script v4.7
+# Recon Cell - Advanced Reconnaissance Framework v1.2
 #
 import subprocess
 import os
@@ -16,15 +16,12 @@ from datetime import datetime
 import shutil
 import shlex
 import xml.etree.ElementTree as ET
-import importlib.util
 import csv
-import tempfile
-import hashlib
 
 # --- Configuration ---
-__version__ = "4.7"
+__version__ = "1.2"
 DEFAULT_PORTS = "80,443,8080,8443,8000,8008,8088,8888,3000,5000,9000"
-GITHUB_RAW_URL = "https://raw.githubusercontent.com/yourusername/recon-suite/main/recon.py"
+GITHUB_RAW_URL = "https://raw.githubusercontent.com/yourusername/recon-cell/main/recon-cell.py"
 OUTPUT_DIR = "recon_results"
 WEB_PORTS = {80, 443, 8080, 8443, 8000, 8008, 8088, 8888, 3000, 5000, 9000}
 TIMEOUT = 5
@@ -33,9 +30,9 @@ SSL_VERIFY = False
 # --- Helper Functions ---
 def print_banner():
     print("="*60)
-    print(f"  Recon-Cell v{__version__} - Professional Security Scanner")
+    print(f"  RECON CELL v{__version__} - Advanced Reconnaissance Framework")
     print("="*60)
-    print(f"[*] Start: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"[*] Scan started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 def sanitize_domain(domain):
     """Sanitize domain input by removing dangerous characters"""
@@ -322,7 +319,7 @@ def check_web_service_sync(host_port, custom_headers=None, rate_limit_delay=0):
         
     host, port = host_port
     schemes = ['https'] if port == 443 else ['http'] if port == 80 else ['http', 'https']
-    headers = {'User-Agent': 'ReconScript/4.6'}
+    headers = {'User-Agent': 'ReconCell/1.2'}
     if custom_headers:
         headers.update(custom_headers)
     
@@ -407,7 +404,7 @@ def capture_screenshot(url, output_dir):
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--window-size=1920,1080")
-        options.add_argument("user-agent=ReconScript/4.6")
+        options.add_argument("user-agent=ReconCell/1.2")
         
         driver = webdriver.Chrome(options=options)
         driver.get(url)
@@ -649,12 +646,12 @@ def export_to_csv(results, filename):
 # --- Main Entry Point ---
 def main():
     start_time = datetime.now()
-    parser = argparse.ArgumentParser(description=f"Advanced Reconnaissance Automation Tool v{__version__}")
-    parser.add_argument('-d', '--domains', help="Comma-separated domain list")
+    parser = argparse.ArgumentParser(description=f"Recon Cell v{__version__}")
+    parser.add_argument('-d', '--domains', help="Comma-separated domain list or file")
     parser.add_argument('-c', '--cidr', help="CIDR range to scan")
     parser.add_argument('-p', '--ports', default=DEFAULT_PORTS, help="Ports to scan")
-    parser.add_argument('-t', '--threads', type=int, default=DEFAULT_THREADS, help="Number of threads")
-    parser.add_argument('--rate-limit', type=int, default=DEFAULT_RATE_LIMIT, help="Max requests per second for HTTP checks")
+    parser.add_argument('-t', '--threads', type=int, default=10, help="Number of threads")
+    parser.add_argument('--rate-limit', type=int, default=10, help="Max requests per second for HTTP checks")
     parser.add_argument('--masscan', action='store_true', help="Use Masscan")
     parser.add_argument('--tools', default='sublist3r,amass', help="Subdomain enumeration tools")
     parser.add_argument('--headers', help="Custom HTTP headers as JSON")
@@ -664,10 +661,15 @@ def main():
     parser.add_argument('--nuclei-templates', help="Path to custom Nuclei templates")
     parser.add_argument('--ssl-verify', action='store_true', help="Enable SSL certificate verification")
     parser.add_argument('--csv', action='store_true', help="Export results to CSV")
-    parser.add_argument('--update', action='store_true', help="Update script from GitHub repository")
+    parser.add_argument('--update', action='store_true', help="Update script from GitHub")
+    parser.add_argument('--version', action='store_true', help="Show version")
     
     args = parser.parse_args()
     
+    if args.version:
+        print(f"Recon Cell v{__version__}")
+        sys.exit(0)
+        
     # Handle update request first
     if args.update:
         if update_script():
@@ -723,11 +725,17 @@ def main():
             config['capture_screenshots'] = False
     
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    print_banner(config['threads'], args.ports)
+    print_banner()
     
     # Execute scan
     if args.domains:
-        domains = [sanitize_domain(d) for d in args.domains.split(',')]
+        # Check if domains is a file
+        if os.path.isfile(args.domains):
+            with open(args.domains) as f:
+                domains = [sanitize_domain(line.strip()) for line in f if line.strip()]
+        else:
+            domains = [sanitize_domain(d) for d in args.domains.split(',')]
+        
         results, summary = run_domain_scan(
             domains, 
             config, 
