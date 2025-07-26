@@ -1,4 +1,4 @@
-# Recon Suite v4.7
+# Recon-Cell v4.7
 
 Professional reconnaissance tool for security professionals and bug bounty hunters. Performs comprehensive scanning including subdomain discovery, port scanning, service detection, and vulnerability scanning.
 
