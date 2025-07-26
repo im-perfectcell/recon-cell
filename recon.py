@@ -33,7 +33,7 @@ SSL_VERIFY = False
 # --- Helper Functions ---
 def print_banner():
     print("="*60)
-    print(f"  Recon Suite v{__version__} - Professional Security Scanner")
+    print(f"  Recon-Cell v{__version__} - Professional Security Scanner")
     print("="*60)
     print(f"[*] Start: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
