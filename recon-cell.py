@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# Recon Cell - Advanced Reconnaissance Framework v1.2
+# Recon Cell - Elite Reconnaissance Framework v2.1
 #
 import subprocess
 import os
@@ -17,22 +17,99 @@ import shutil
 import shlex
 import xml.etree.ElementTree as ET
 import csv
+import socket
+import logging
+from logging.handlers import RotatingFileHandler
+import asyncio
+import aiohttp
+import dns.resolver
+import yaml
+import importlib.util
+from urllib.parse import urljoin
+import random
 
 # --- Configuration ---
-__version__ = "1.2"
-DEFAULT_PORTS = "80,443,8080,8443,8000,8008,8088,8888,3000,5000,9000"
-GITHUB_RAW_URL = "GITHUB_RAW_URL = "https://raw.githubusercontent.com/im-perfectcell/recon-cell/main/recon-cell.py""
+__version__ = "2.1"
+DEFAULT_PORTS = "80,443,8080,8443"
+GITHUB_RAW_URL = "https://raw.githubusercontent.com/im-perfectcell/recon-cell/main/recon-cell.py"
 OUTPUT_DIR = "recon_results"
-WEB_PORTS = {80, 443, 8080, 8443, 8000, 8008, 8088, 8888, 3000, 5000, 9000}
+WEB_PORTS = {80, 443, 8080, 8443}
 TIMEOUT = 5
-SSL_VERIFY = False
+SSL_VERIFY = True
+CONFIG_PATH = os.path.expanduser("~/.recon-cell.yaml")
+DEBUG = False
+
+# --- Logging Setup ---
+def setup_logging(debug=False):
+    """Configure logging with file rotation and console output"""
+    global DEBUG
+    DEBUG = debug
+    
+    logger = logging.getLogger('recon-cell')
+    logger.setLevel(logging.DEBUG if debug else logging.INFO)
+    
+    # Clear existing handlers
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+    
+    # Console handler
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.DEBUG if debug else logging.INFO)
+    formatter = logging.Formatter('%(levelname)s: %(message)s')
+    ch.setFormatter(formatter)
+    logger.addHandler(ch)
+    
+    # File handler
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    fh = RotatingFileHandler(
+        os.path.join(OUTPUT_DIR, 'recon-cell.log'),
+        maxBytes=10*1024*1024,  # 10MB
+        backupCount=5
+    )
+    fh.setLevel(logging.DEBUG)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
+    
+    return logger
+
+logger = setup_logging()
+
+# --- Configuration Management ---
+def load_config():
+    """Load configuration from YAML file"""
+    default_config = {
+        'ports': DEFAULT_PORTS,
+        'threads': 10,
+        'rate_limit': 10,
+        'mode': 'normal',
+        'dns_timeout': 5,
+        'dns_retries': 3
+    }
+    
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH) as f:
+                user_config = yaml.safe_load(f)
+                # Merge configs
+                for key, value in user_config.items():
+                    if isinstance(value, dict) and key in default_config:
+                        default_config[key].update(value)
+                    else:
+                        default_config[key] = value
+            logger.info("Loaded configuration from %s", CONFIG_PATH)
+        except Exception as e:
+            logger.error("Error loading config: %s", str(e))
+    
+    return default_config
 
 # --- Helper Functions ---
 def print_banner():
     print("="*60)
-    print(f"  RECON CELL v{__version__} - Advanced Reconnaissance Framework")
+    print(f"  RECON CELL v{__version__} - Elite Reconnaissance Framework")
     print("="*60)
     print(f"[*] Scan started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info("Scan started")
 
 def sanitize_domain(domain):
     """Sanitize domain input by removing dangerous characters"""
@@ -46,11 +123,11 @@ def validate_cidr(cidr):
             print(f"[WARNING] Large CIDR range: {cidr} ({network.num_addresses} hosts)")
             confirm = input("Continue? (y/n): ").lower()
             if confirm != 'y':
-                print("Scan aborted")
+                logger.info("User aborted scan due to large CIDR range")
                 sys.exit(0)
         return cidr
     except ValueError:
-        print(f"[ERROR] Invalid CIDR: {cidr}")
+        logger.error("Invalid CIDR: %s", cidr)
         sys.exit(1)
 
 def parse_ports(ports_str):
@@ -72,7 +149,7 @@ def parse_ports(ports_str):
 def check_tool(tool):
     """Check if a tool is installed with installation guidance"""
     if not shutil.which(tool):
-        print(f"[ERROR] {tool} not found.")
+        logger.error("%s not found", tool)
         install_commands = {
             'nmap': "sudo apt-get install nmap",
             'masscan': "sudo apt-get install masscan",
@@ -81,19 +158,21 @@ def check_tool(tool):
             'nuclei': "go install -v github.com/projectdiscovery/nuclei/v2/cmd/nuclei@latest"
         }
         if tool in install_commands:
-            print(f"Install with: '{install_commands[tool]}'")
+            logger.info("Install with: '%s'", install_commands[tool])
         sys.exit(1)
-    print(f"[OK] {tool} is installed")
+    logger.debug("%s is installed", tool)
 
 def write_targets(targets, filename):
     """Write targets to a file"""
     with open(filename, 'w') as f:
         for target in targets:
             f.write(f"{target}\n")
+    logger.debug("Wrote targets to %s", filename)
 
 def parse_nmap_xml(xml_file):
     """Parse Nmap XML output for open ports and services"""
     try:
+        logger.debug("Parsing Nmap XML: %s", xml_file)
         tree = ET.parse(xml_file)
         root = tree.getroot()
         services = {}
@@ -117,15 +196,46 @@ def parse_nmap_xml(xml_file):
                                 service_info[attr] = service_elem.get(attr)
                     port_data.append((port_id, service_info))
             services[ip] = {'hostnames': hostnames, 'ports': port_data}
+        logger.debug("Parsed %d hosts from Nmap XML", len(services))
         return services
     except Exception as e:
-        print(f"[!] XML parsing error: {str(e)}")
+        logger.exception("XML parsing error: %s", str(e))
         return {}
+
+def resolve_domain(domain, config):
+    """Resolve domain to IP address with retries"""
+    for attempt in range(config['dns_retries']):
+        try:
+            result = dns.resolver.resolve(domain, 'A')
+            if result:
+                return str(result[0])
+        except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN, dns.resolver.Timeout):
+            pass
+        except Exception as e:
+            logger.debug("DNS resolution error: %s", str(e))
+        
+        logger.debug("DNS resolution failed for %s (attempt %d/%d)", 
+                    domain, attempt+1, config['dns_retries'])
+        time.sleep(0.5)
+    
+    logger.warning("DNS resolution failed for %s after %d attempts", 
+                  domain, config['dns_retries'])
+    return None
+
+def host_alive(host):
+    """Check if host is alive using ICMP ping"""
+    try:
+        param = '-n' if sys.platform.lower().startswith('win') else '-c'
+        command = ['ping', param, '1', '-W', '2', host]
+        return subprocess.call(command, stdout=subprocess.DEVNULL, 
+                              stderr=subprocess.DEVNULL) == 0
+    except Exception:
+        return False
 
 # --- GitHub Auto-Update ---
 def update_script():
     """Update script from GitHub repository"""
-    print(f"[*] Checking for updates on GitHub...")
+    logger.info("Checking for updates on GitHub...")
     
     try:
         # Fetch latest version
@@ -136,20 +246,20 @@ def update_script():
         # Extract version from new script
         version_match = re.search(r'__version__\s*=\s*"([\d.]+)"', new_content)
         if not version_match:
-            print("[!] Could not determine version from GitHub script")
+            logger.error("Could not determine version from GitHub script")
             return False
             
         new_version = version_match.group(1)
         
         # Compare versions
         if tuple(map(int, new_version.split('.'))) <= tuple(map(int, __version__.split('.'))):
-            print(f"[*] Already running latest version ({__version__})")
+            logger.info("Already running latest version (%s)", __version__)
             return True
         
         # Create backup
         backup_path = f"{__file__}.bak"
         shutil.copyfile(__file__, backup_path)
-        print(f"[+] Created backup: {backup_path}")
+        logger.info("Created backup: %s", backup_path)
         
         # Write new version
         with open(__file__, 'w') as f:
@@ -158,20 +268,21 @@ def update_script():
         # Set executable permissions
         os.chmod(__file__, 0o755)
         
-        print(f"[+] Updated successfully to version {new_version}!")
-        print("[*] Please rerun the script to use the new version")
+        logger.info("Updated successfully to version %s!", new_version)
+        print(f"[+] Updated to v{new_version}! Please rerun the script.")
         return True
         
     except requests.RequestException as e:
-        print(f"[!] Update failed: {str(e)}")
+        logger.error("Update failed: %s", str(e))
         return False
     except Exception as e:
-        print(f"[!] Update error: {str(e)}")
+        logger.exception("Update error: %s", str(e))
         return False
 
 # --- Core Functions ---
 def run_command(cmd, tool_name):
     """Execute a command safely with comprehensive error handling"""
+    logger.debug("Running command: %s", cmd)
     try:
         result = subprocess.run(
             shlex.split(cmd),
@@ -181,22 +292,24 @@ def run_command(cmd, tool_name):
             check=True,
             timeout=600
         )
+        if DEBUG:
+            logger.debug("%s output:\n%s", tool_name, result.stdout[:1000])
         return result.stdout
     except subprocess.CalledProcessError as e:
-        print(f"[!] {tool_name} failed: {e.stderr.strip()}")
+        logger.error("%s failed: %s", tool_name, e.stderr.strip())
         return None
     except subprocess.TimeoutExpired:
-        print(f"[!] {tool_name} timed out after 10 minutes")
+        logger.error("%s timed out after 10 minutes", tool_name)
         return None
     except Exception as e:
-        print(f"[!] Unexpected error with {tool_name}: {str(e)}")
+        logger.exception("Unexpected error with %s: %s", tool_name, str(e))
         return None
 
 def enum_subdomains(target, output_dir, tools, threads, timeout=30):
     """Enumerate subdomains using multiple tools in parallel"""
     out_file = os.path.join(output_dir, f"{target}_subdomains.txt")
     results = set()
-    print(f"[*] Enumerating subdomains for {target}...")
+    logger.info("Enumerating subdomains for %s...", target)
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as executor:
         tool_futures = []
@@ -218,16 +331,16 @@ def enum_subdomains(target, output_dir, tools, threads, timeout=30):
                 with open(tool_file) as f:
                     results.update(line.strip() for line in f if line.strip())
             except Exception as e:
-                print(f"[!] Error reading {tool_file}: {str(e)}")
+                logger.error("Error reading %s: %s", tool_file, str(e))
     
     if results:
         with open(out_file, 'w') as f:
             for d in sorted(results):
                 f.write(d + "\n")
-        print(f"[+] Found {len(results)} subdomains for {target}")
+        logger.info("Found %d subdomains for %s", len(results), target)
         return list(results)
     else:
-        print(f"[!] No subdomains found for {target}")
+        logger.warning("No subdomains found for %s", target)
         return []
 
 def run_port_scan(targets, ports, config):
@@ -257,13 +370,19 @@ def run_port_scan(targets, ports, config):
                         parts = line.split()
                         ip, port = parts[3], int(parts[2])
                         masscan_results.setdefault(ip, []).append(port)
+            logger.debug("Masscan found %d open ports", len(masscan_results))
     
     nmap_out = target_file + ".nmap"
     version_intensity = "-sV --version-intensity 5" if config['mode'] in ['aggressive', 'normal'] else ""
-    nmap_cmd = f"nmap {nmap_timing} {version_intensity} -sS -p {port_str} --open -iL {target_file} -oX {nmap_out}.xml"
+    nmap_cmd = f"nmap {nmap_timing} -Pn {version_intensity} -sS -p {port_str} --open -iL {target_file} -oX {nmap_out}.xml"
     run_command(nmap_cmd, "Nmap")
     
-    nmap_results = parse_nmap_xml(f"{nmap_out}.xml")
+    nmap_file = f"{nmap_out}.xml"
+    if not os.path.exists(nmap_file):
+        logger.error("Nmap failed to create XML output")
+        return {}
+    
+    nmap_results = parse_nmap_xml(nmap_file)
     
     # Merge Masscan and Nmap results
     for ip, ports in masscan_results.items():
@@ -273,12 +392,13 @@ def run_port_scan(targets, ports, config):
             if not any(p[0] == port for p in nmap_results[ip]['ports']):
                 nmap_results[ip]['ports'].append((port, {'protocol': 'tcp', 'state': 'open', 'name': 'unknown'}))
     
+    logger.info("Port scan completed for %d targets", len(targets))
     return nmap_results
 
-def identify_tech(response):
+def identify_tech(response, url):
     """Identify web technologies from response headers"""
     tech = []
-    headers = response.headers
+    headers = response
     
     # Server identification
     server = headers.get('Server', '')
@@ -298,7 +418,7 @@ def identify_tech(response):
     # Application detection
     if headers.get('X-Drupal-Cache'): tech.append('Drupal')
     if headers.get('X-Generator') == 'WordPress': tech.append('WordPress')
-    if 'wp-' in response.url: tech.append('WordPress (URL pattern)')
+    if 'wp-' in url: tech.append('WordPress (URL pattern)')
     if 'django' in headers.get('Set-Cookie', ''): tech.append('Django')
     
     # Security headers
@@ -312,14 +432,11 @@ def identify_tech(response):
     
     return list(set(tech))  # Deduplicate
 
-def check_web_service_sync(host_port, custom_headers=None, rate_limit_delay=0):
-    """Synchronous web service check with rate limiting"""
-    if rate_limit_delay > 0:
-        time.sleep(rate_limit_delay)
-        
+async def check_web_service(session, host_port, custom_headers=None):
+    """Asynchronous web service check"""
     host, port = host_port
     schemes = ['https'] if port == 443 else ['http'] if port == 80 else ['http', 'https']
-    headers = {'User-Agent': 'ReconCell/1.2'}
+    headers = {'User-Agent': f'ReconCell/{__version__}'}
     if custom_headers:
         headers.update(custom_headers)
     
@@ -327,69 +444,52 @@ def check_web_service_sync(host_port, custom_headers=None, rate_limit_delay=0):
         url = f"{scheme}://{host}:{port}" if port not in (80, 443) else f"{scheme}://{host}"
         try:
             # First try HEAD request
-            response = requests.head(
-                url,
-                headers=headers,
-                allow_redirects=True,
-                verify=SSL_VERIFY,
-                timeout=TIMEOUT
-            )
-            
-            # Fallback to GET if needed
-            if response.status_code >= 400:
-                response = requests.get(
-                    url,
-                    headers=headers,
-                    allow_redirects=True,
-                    verify=SSL_VERIFY,
-                    timeout=TIMEOUT
-                )
-            
-            if response.status_code < 400:
-                tech = identify_tech(response)
-                print(f"[+] Valid service at {url} (Status {response.status_code})")
-                return {
-                    'url': url,
-                    'final_url': response.url,
-                    'status': response.status_code,
-                    'headers': dict(response.headers),
-                    'tech': tech
-                }
-        except requests.RequestException as e:
-            print(f"[~] Connection error to {url}: {str(e)}")
+            async with session.head(url, headers=headers, timeout=aiohttp.ClientTimeout(total=TIMEOUT)) as resp:
+                # If HEAD not allowed, try GET
+                if resp.status >= 400:
+                    async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=TIMEOUT)) as get_resp:
+                        resp = get_resp
+                
+                if resp.status < 400:
+                    tech = identify_tech(resp.headers, str(resp.url))
+                    logger.info("Valid service at %s (Status %d)", url, resp.status)
+                    return {
+                        'url': url,
+                        'final_url': str(resp.url),
+                        'status': resp.status,
+                        'headers': dict(resp.headers),
+                        'tech': tech
+                    }
+        except aiohttp.ClientError as e:
+            logger.debug("Connection error to %s: %s", url, str(e))
+        except asyncio.TimeoutError:
+            logger.debug("Timeout connecting to %s", url)
     
     return None
 
-def check_web_services_sync(targets, custom_headers, rate_limit, threads):
-    """Check web services synchronously with rate limiting"""
+async def check_web_services(targets, custom_headers, rate_limit, max_workers):
+    """Check web services asynchronously with rate limiting"""
     services = {}
-    total = len(targets)
-    rate_limit_delay = 1.0 / rate_limit if rate_limit > 0 else 0
-    
-    with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as executor:
-        future_to_target = {}
-        for i, target in enumerate(targets):
-            # Calculate delay to maintain rate limit
-            delay = i * rate_limit_delay if rate_limit > 0 else 0
-            future = executor.submit(
-                check_web_service_sync, 
-                target, 
-                custom_headers,
-                delay
-            )
-            future_to_target[future] = target
+    connector = aiohttp.TCPConnector(limit_per_host=5, ssl=SSL_VERIFY)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        semaphore = asyncio.Semaphore(max_workers)
         
-        for i, future in enumerate(concurrent.futures.as_completed(future_to_target), 1):
-            target = future_to_target[future]
-            result = future.result()
+        async def worker(target):
+            async with semaphore:
+                # Rate limiting
+                await asyncio.sleep(1/rate_limit if rate_limit > 0 else 0)
+                result = await check_web_service(session, target, custom_headers)
+                return target, result
+        
+        tasks = [worker(target) for target in targets]
+        for future in asyncio.as_completed(tasks):
+            target, result = await future
             if result:
                 host, port = target
                 service_key = f"{host}:{port}"
                 services[service_key] = result
-                
-            if i % 10 == 0 or i == total:
-                print(f"[*] Checked {i}/{total} web services")
     
+    logger.info("Completed web service checks for %d targets", len(targets))
     return services
 
 def capture_screenshot(url, output_dir):
@@ -404,46 +504,78 @@ def capture_screenshot(url, output_dir):
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--window-size=1920,1080")
-        options.add_argument("user-agent=ReconCell/1.2")
+        options.add_argument(f"user-agent=ReconCell/{__version__}")
         
         driver = webdriver.Chrome(options=options)
         driver.get(url)
         time.sleep(3)  # Allow page to load
         
         # Create safe filename
-        safe_url = re.sub(r'[^a-zA-Z0-9]', '_', url)[:100]
+        safe_url = re.sub(r'[^\w\-]', '_', url)[:100]
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        screenshot_file = os.path.join(output_dir, f"screenshot_{safe_url}_{timestamp}.png")
+        screenshot_file = os.path.join(output_dir, f"screenshots/screenshot_{safe_url}_{timestamp}.png")
         
         # Ensure directory exists
         os.makedirs(os.path.dirname(screenshot_file), exist_ok=True)
         
         driver.save_screenshot(screenshot_file)
         driver.quit()
+        logger.info("Captured screenshot for %s", url)
         return screenshot_file
     except ImportError:
-        print("[!] Selenium not installed. Screenshots disabled.")
+        logger.error("Selenium not installed. Screenshots disabled.")
         return None
     except Exception as e:
-        print(f"[!] Screenshot failed for {url}: {str(e)}")
+        logger.error("Screenshot failed for %s: %s", url, str(e))
         return None
 
 # --- Scan Functions ---
-def run_domain_scan(domains, config, custom_headers=None, rate_limit=0):
+async def run_domain_scan(domains, config, custom_headers=None, rate_limit=0):
     """Scan domains and their subdomains for services"""
     all_targets = []
-    for domain in domains:
-        subdomains = enum_subdomains(
-            domain, 
-            OUTPUT_DIR, 
-            config['enum_tools'], 
-            config['threads'],
-            timeout=config.get('timeout', 30)
-        )
-        all_targets.extend([domain] + subdomains)
+    resolved_targets = []
     
-    print(f"[*] Scanning {len(all_targets)} targets for open ports")
-    scan_results = run_port_scan(all_targets, config['ports'], config)
+    for domain in domains:
+        # DNS resolution check
+        ip = resolve_domain(domain, config)
+        if not ip:
+            logger.warning("Skipping %s - DNS resolution failed", domain)
+            continue
+        
+        if config.get('skip_subdomains'):
+            logger.info("Skipping subdomain enumeration for %s", domain)
+            all_targets.append(domain)
+        else:
+            subdomains = enum_subdomains(
+                domain, 
+                OUTPUT_DIR, 
+                config['enum_tools'], 
+                config['threads'],
+                timeout=config.get('timeout', 30)
+            )
+            all_targets.extend([domain] + subdomains)
+    
+    # Resolve all targets and filter alive hosts
+    for target in all_targets:
+        ip = resolve_domain(target, config)
+        if ip:
+            if host_alive(ip) or config.get('force_scan', False):
+                resolved_targets.append(target)
+            else:
+                logger.warning("Host %s (%s) is not responding to ping", target, ip)
+        else:
+            logger.warning("DNS resolution failed for %s", target)
+    
+    if not resolved_targets:
+        logger.error("No resolvable targets found")
+        return {}, {}
+    
+    logger.info("Scanning %d targets for open ports", len(resolved_targets))
+    scan_results = run_port_scan(resolved_targets, config['ports'], config)
+    
+    if not scan_results:
+        logger.error("No open ports found on any targets")
+        return {}, {}
     
     # Prepare targets for web service checks
     web_targets = []
@@ -456,22 +588,27 @@ def run_domain_scan(domains, config, custom_headers=None, rate_limit=0):
                 service_key = f"{host}:{port}"
                 non_web_services[service_key] = service
     
+    logger.info("Found %d web services to check", len(web_targets))
+    
     # Check web services
-    print(f"[*] Checking {len(web_targets)} web services (Rate limit: {rate_limit}/sec)")
-    services = check_web_services_sync(
-        web_targets,
-        custom_headers,
-        rate_limit,
-        min(config['threads'] * 2, 50)  # Max 50 threads
-    )
+    services = {}
+    if web_targets:
+        services = await check_web_services(
+            web_targets,
+            custom_headers,
+            rate_limit,
+            min(config['threads'] * 2, 50)  # Max 50 threads
+        )
     
     # Capture screenshots
     if config.get('capture_screenshots'):
-        print("[*] Capturing screenshots")
+        logger.info("Capturing screenshots for %d services", len(services))
+        screenshot_dir = os.path.join(OUTPUT_DIR, "screenshots")
+        os.makedirs(screenshot_dir, exist_ok=True)
         for service_key, service in services.items():
-            screenshot = capture_screenshot(service['url'], OUTPUT_DIR)
+            screenshot = capture_screenshot(service['url'], screenshot_dir)
             if screenshot:
-                service['screenshot'] = screenshot
+                service['screenshot'] = os.path.basename(screenshot)
     
     # Organize results by domain
     results = {}
@@ -495,20 +632,24 @@ def run_domain_scan(domains, config, custom_headers=None, rate_limit=0):
     }
     return results, summary
 
-def run_cidr_scan(cidr, config, custom_headers=None, rate_limit=0):
+async def run_cidr_scan(cidr, config, custom_headers=None, rate_limit=0):
     """Scan a CIDR range for services"""
     net = ipaddress.ip_network(cidr)
     targets = [str(ip) for ip in net.hosts()]
     
     if len(targets) > 1000:
-        print(f"[WARNING] Scanning {len(targets)} hosts. This may take a while.")
+        logger.warning("Scanning %d hosts in %s", len(targets), cidr)
         confirm = input("Proceed? (y/n): ").lower()
         if confirm != 'y':
-            print("Scan aborted")
+            logger.info("Scan aborted by user")
             sys.exit(0)
     
-    print(f"[*] Scanning {len(targets)} hosts in {cidr}")
+    logger.info("Scanning %d hosts in %s", len(targets), cidr)
     scan_results = run_port_scan(targets, config['ports'], config)
+    
+    if not scan_results:
+        logger.error("No open ports found on any hosts")
+        return {}, {}
     
     # Prepare targets for web service checks
     web_targets = []
@@ -521,22 +662,27 @@ def run_cidr_scan(cidr, config, custom_headers=None, rate_limit=0):
                 service_key = f"{ip}:{port}"
                 non_web_services[service_key] = service
     
+    logger.info("Found %d web services to check", len(web_targets))
+    
     # Check web services
-    print(f"[*] Checking {len(web_targets)} web services (Rate limit: {rate_limit}/sec)")
-    services = check_web_services_sync(
-        web_targets,
-        custom_headers,
-        rate_limit,
-        min(config['threads'] * 2, 50)  # Max 50 threads
-    )
+    services = {}
+    if web_targets:
+        services = await check_web_services(
+            web_targets,
+            custom_headers,
+            rate_limit,
+            min(config['threads'] * 2, 50)  # Max 50 threads
+        )
     
     # Capture screenshots
     if config.get('capture_screenshots'):
-        print("[*] Capturing screenshots")
+        logger.info("Capturing screenshots for %d services", len(services))
+        screenshot_dir = os.path.join(OUTPUT_DIR, "screenshots")
+        os.makedirs(screenshot_dir, exist_ok=True)
         for service_key, service in services.items():
-            screenshot = capture_screenshot(service['url'], OUTPUT_DIR)
+            screenshot = capture_screenshot(service['url'], screenshot_dir)
             if screenshot:
-                service['screenshot'] = screenshot
+                service['screenshot'] = os.path.basename(screenshot)
     
     # Organize results
     results = {'cidr': cidr, 'hosts': {}}
@@ -559,7 +705,7 @@ def run_cidr_scan(cidr, config, custom_headers=None, rate_limit=0):
 def run_vuln_scan(urls, output_dir, templates_path=None):
     """Run Nuclei vulnerability scan on discovered web services"""
     if not urls:
-        print("[!] No URLs for vulnerability scanning")
+        logger.error("No URLs for vulnerability scanning")
         return None
     
     targets_file = os.path.join(output_dir, "vuln_targets.txt")
@@ -572,6 +718,7 @@ def run_vuln_scan(urls, output_dir, templates_path=None):
     cmd = f"nuclei -l {targets_file} -t {templates} -o {vuln_file}"
     
     if run_command(cmd, "Nuclei"):
+        logger.info("Vulnerability scan completed: %s", vuln_file)
         return vuln_file
     return None
 
@@ -640,22 +787,22 @@ def export_to_csv(results, filename):
                             'Tech': ''
                         })
     
-    print(f"[+] CSV report exported: {filename}")
+    logger.info("CSV report exported: %s", filename)
     return filename
 
 # --- Main Entry Point ---
-def main():
+async def async_main():
     start_time = datetime.now()
     parser = argparse.ArgumentParser(description=f"Recon Cell v{__version__}")
     parser.add_argument('-d', '--domains', help="Comma-separated domain list or file")
     parser.add_argument('-c', '--cidr', help="CIDR range to scan")
-    parser.add_argument('-p', '--ports', default=DEFAULT_PORTS, help="Ports to scan")
-    parser.add_argument('-t', '--threads', type=int, default=10, help="Number of threads")
-    parser.add_argument('--rate-limit', type=int, default=10, help="Max requests per second for HTTP checks")
+    parser.add_argument('-p', '--ports', help="Ports to scan")
+    parser.add_argument('-t', '--threads', type=int, help="Number of threads")
+    parser.add_argument('--rate-limit', type=int, help="Max requests per second for HTTP checks")
     parser.add_argument('--masscan', action='store_true', help="Use Masscan")
-    parser.add_argument('--tools', default='sublist3r,amass', help="Subdomain enumeration tools")
+    parser.add_argument('--tools', help="Subdomain enumeration tools")
     parser.add_argument('--headers', help="Custom HTTP headers as JSON")
-    parser.add_argument('--mode', choices=['stealth', 'normal', 'aggressive'], default='normal', help="Scan mode")
+    parser.add_argument('--mode', choices=['stealth', 'normal', 'aggressive'], help="Scan mode")
     parser.add_argument('--screenshots', action='store_true', help="Capture screenshots of web services")
     parser.add_argument('--vuln-scan', action='store_true', help="Run vulnerability scan with Nuclei")
     parser.add_argument('--nuclei-templates', help="Path to custom Nuclei templates")
@@ -663,8 +810,15 @@ def main():
     parser.add_argument('--csv', action='store_true', help="Export results to CSV")
     parser.add_argument('--update', action='store_true', help="Update script from GitHub")
     parser.add_argument('--version', action='store_true', help="Show version")
+    parser.add_argument('--no-subdomains', action='store_true', help="Skip subdomain enumeration")
+    parser.add_argument('--force', action='store_true', help="Scan hosts even if they don't respond to ping")
+    parser.add_argument('--debug', action='store_true', help="Enable debug output")
     
     args = parser.parse_args()
+    
+    # Setup logging based on debug flag
+    global logger
+    logger = setup_logging(args.debug)
     
     if args.version:
         print(f"Recon Cell v{__version__}")
@@ -678,30 +832,27 @@ def main():
             sys.exit(1)
     
     if not (args.domains or args.cidr):
-        print("[ERROR] Specify either domains or CIDR range")
+        logger.error("Specify either domains or CIDR range")
         sys.exit(1)
     
-    # Configuration
-    try:
-        ports = parse_ports(args.ports)
-        config = {
-            'ports': ports,
-            'threads': args.threads,
-            'use_masscan': args.masscan,
-            'enum_tools': args.tools.split(','),
-            'mode': args.mode,
-            'capture_screenshots': args.screenshots,
-            'run_vuln_scan': args.vuln_scan,
-            'timeout': 30  # Subdomain enumeration timeout
-        }
-    except ValueError as e:
-        print(f"[ERROR] {str(e)}")
-        sys.exit(1)
+    # Load configuration
+    config = load_config()
     
-    global SSL_VERIFY
-    SSL_VERIFY = args.ssl_verify
-    if not SSL_VERIFY:
-        print("[WARNING] SSL certificate verification is disabled. Use --ssl-verify to enable.")
+    # Apply CLI overrides to config
+    if args.ports: config['ports'] = args.ports
+    if args.threads: config['threads'] = args.threads
+    if args.rate_limit: config['rate_limit'] = args.rate_limit
+    if args.mode: config['mode'] = args.mode
+    if args.tools: config['enum_tools'] = args.tools.split(',')
+    config['use_masscan'] = args.masscan
+    config['capture_screenshots'] = args.screenshots
+    config['run_vuln_scan'] = args.vuln_scan
+    config['skip_subdomains'] = args.no_subdomains
+    config['force_scan'] = args.force
+    
+    if args.ssl_verify:
+        global SSL_VERIFY
+        SSL_VERIFY = True
     
     custom_headers = json.loads(args.headers) if args.headers else None
     
@@ -718,16 +869,20 @@ def main():
     # Screenshot dependencies
     if config['capture_screenshots']:
         if importlib.util.find_spec("selenium") is None:
-            print("[!] Selenium not installed. Screenshots disabled.")
+            logger.error("Selenium not installed. Screenshots disabled.")
             config['capture_screenshots'] = False
         elif not shutil.which("chromedriver"):
-            print("[!] ChromeDriver not found. Screenshots disabled.")
+            logger.error("ChromeDriver not found. Screenshots disabled.")
             config['capture_screenshots'] = False
     
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     print_banner()
     
     # Execute scan
+    results = {}
+    summary = {}
+    scan_type = ""
+    
     if args.domains:
         # Check if domains is a file
         if os.path.isfile(args.domains):
@@ -736,20 +891,20 @@ def main():
         else:
             domains = [sanitize_domain(d) for d in args.domains.split(',')]
         
-        results, summary = run_domain_scan(
+        results, summary = await run_domain_scan(
             domains, 
             config, 
             custom_headers, 
-            args.rate_limit
+            config['rate_limit']
         )
         scan_type = "domain"
     elif args.cidr:
         cidr = validate_cidr(args.cidr)
-        results, summary = run_cidr_scan(
+        results, summary = await run_cidr_scan(
             cidr, 
             config, 
             custom_headers, 
-            args.rate_limit
+            config['rate_limit']
         )
         scan_type = "cidr"
     
@@ -769,7 +924,7 @@ def main():
                     web_urls.append(service['url'])
         
         if web_urls:
-            print(f"[*] Running vulnerability scan on {len(web_urls)} URLs")
+            logger.info("Running vulnerability scan on %d URLs", len(web_urls))
             vuln_report = run_vuln_scan(web_urls, OUTPUT_DIR, args.nuclei_templates)
     
     # Save results
@@ -777,7 +932,7 @@ def main():
     out_file = os.path.join(OUTPUT_DIR, f"{scan_type}_results_{timestamp}.json")
     with open(out_file, 'w') as f:
         json.dump(results, f, indent=2)
-    print(f"[*] Results saved to {out_file}")
+    logger.info("Results saved to %s", out_file)
     
     # Export to CSV if requested
     if args.csv:
@@ -805,6 +960,9 @@ def main():
             print(f"Vulnerability report: {vuln_report}")
         
         print("========================")
+
+def main():
+    asyncio.run(async_main())
 
 if __name__ == "__main__":
     main()
